@@ -1,0 +1,105 @@
+rules_version = '2';
+// Firestore: Console → Firestore → Rules → Publish
+//
+// IMPORTANT: Outgoing calls + PK also use REALTIME DATABASE (not Firestore):
+//   pk_queue, pk_matches, call_invites, call_responses, rooms/*, live_publishers/*, presence/*
+// Realtime DB: paste firebase/database.rules.json into Console → Realtime Database → Rules.
+// Do NOT paste database.rules.for-firebase-cli.json in the Console — it contains ".info/connected",
+// and the Console errors (e.g. "String can't contain '.'") and refuses to save. Use database.rules.json.
+// For `firebase deploy` only, use database.rules.for-firebase-cli.json (includes .info/connected).
+//
+// Requires Firebase Auth (request.auth != null). Guest / unsigned users get PERMISSION_DENIED.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    // Profiles, presence, follow/like counters (app updates self + other users for followers/likes)
+    match /users/{userId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.auth.uid == userId;
+      allow update: if signedIn();
+      allow delete: if signedIn() && request.auth.uid == userId;
+    }
+
+    // 1:1 call invites (queried by receiverId + status)
+    match /calls/{callId} {
+      allow read, create, update, delete: if signedIn();
+    }
+
+    // 1:1 DMs (queried by chatId, senderId, receiverId)
+    match /messages/{messageId} {
+      allow read, create: if signedIn();
+      allow update, delete: if signedIn();
+    }
+
+    match /gifts/{giftId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    match /gift_transactions/{txId} {
+      allow read, create, update: if signedIn();
+      allow delete: if false;
+    }
+
+    match /transactions/{txId} {
+      allow read: if signedIn();
+      allow create: if signedIn();
+      allow update, delete: if false;
+    }
+
+    match /battles/{battleId} {
+      allow read, create, update: if signedIn();
+      allow delete: if signedIn();
+    }
+
+    // Live + PK banners (pkGuestUserId, pkStartedAtMillis, …); subcollection live chat.
+    // Optional: hostPrivateCallBusy (solo host on a private call) — same create/update as other live_streams fields.
+    // PK guest video for spectators uses Realtime DB live_publishers/… (see database.rules.json), not Firestore.
+    match /live_streams/{streamId} {
+      allow read, create, update, delete: if signedIn();
+      match /messages/{msgId} {
+        allow read, create, update, delete: if signedIn();
+      }
+    }
+
+    // Audio-party seat map + now playing (`streams/{hostUid}`), parallel to `live_streams`.
+    match /streams/{streamId} {
+      allow read, create, update, delete: if signedIn();
+      // 1:1 video call requests to the host (`documentId` = requester's uid).
+      match /video_call_requests/{reqId} {
+        allow read: if signedIn() &&
+          (request.auth.uid == streamId || request.auth.uid == reqId);
+        allow create: if signedIn() && request.auth.uid == reqId;
+        allow update: if signedIn() &&
+          (request.auth.uid == streamId || request.auth.uid == reqId);
+        allow delete: if false;
+      }
+    }
+
+    match /diamondResellers/{docId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    match /crm_gifts/{docId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    match /crm_lucky_gifts/{docId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    // CRM / admin announcements (Messages tab); clients read only — publish via Admin SDK or Console.
+    match /crm_announcements/{docId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+  }
+}
