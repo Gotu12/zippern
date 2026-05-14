@@ -14,6 +14,28 @@ import com.zipper.datingapp.data.Gift
  */
 object VirtualEconomyMath {
 
+    /**
+     * Receiver-side share of a billed call charge (percent points, divide 💎 cost by 100), after connectivity flags:
+     * **same gender 30%**, **male→female 50%**, **female→male 40%**.
+     * Unknown / ambiguous payer–receiver pairing falls back to [callReceiverBeansBpsReceiverOnly].
+     */
+    fun callReceiverSharePercentPointsForVideoCallSettlement(
+        payerGenderRaw: String?,
+        receiverGenderRaw: String?,
+    ): Long {
+        val payerMale = isMaleGender(payerGenderRaw) && !isFemaleGender(payerGenderRaw)
+        val payerFemale = isFemaleGender(payerGenderRaw) && !isMaleGender(payerGenderRaw)
+        val recvMale = isMaleGender(receiverGenderRaw) && !isFemaleGender(receiverGenderRaw)
+        val recvFemale = isFemaleGender(receiverGenderRaw) && !isMaleGender(receiverGenderRaw)
+        val sameGenderBin = (payerMale && recvMale) || (payerFemale && recvFemale)
+        return when {
+            sameGenderBin -> 30L
+            payerMale && recvFemale -> 50L
+            payerFemale && recvMale -> 40L
+            else -> callReceiverBeansBpsReceiverOnly(receiverGenderRaw)
+        }
+    }
+
     /** Default audio rate (💎/min) when [com.zipper.datingapp.data.UserProfile.customAudioPrice] is null. */
     const val DEFAULT_CALL_AUDIO_DIAMONDS_PER_MIN = 1000
 

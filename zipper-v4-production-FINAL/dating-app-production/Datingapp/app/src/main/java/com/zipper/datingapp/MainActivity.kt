@@ -1818,6 +1818,7 @@ fun DatingAppApp(
                         uiState = uiState,
                         isGuestPreview = uiState.currentUser?.isGuest == true || uiState.isGuest,
                         onGuestRestricted = onRequestLoginRequired,
+                        onEnsureInboxFresh = { viewModel.refreshGlobalMessageInbox() },
                         onSendMessage = { userId, text ->
                             checkAccess(
                                 isGuest = uiState.currentUser?.isGuest == true || uiState.isGuest,

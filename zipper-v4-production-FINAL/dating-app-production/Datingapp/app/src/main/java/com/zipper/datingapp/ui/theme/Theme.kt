@@ -8,10 +8,13 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.Density
 import androidx.core.view.WindowCompat
 
 private val DarkColorScheme = darkColorScheme(
@@ -114,6 +117,14 @@ fun DatingAppTheme(
     MaterialTheme(
         colorScheme = colorScheme,
         typography = Typography,
-        content = content
+        content = {
+            val density = LocalDensity.current
+            // Clamp OS font scale so large accessibility settings cannot blow up dense Compose layouts (calls, live, chat).
+            val capped = density.fontScale.coerceIn(1f, 1.2f)
+            CompositionLocalProvider(
+                LocalDensity provides Density(density.density, capped),
+                content = content
+            )
+        }
     )
 }

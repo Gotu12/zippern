@@ -35,6 +35,9 @@ val snapLensGroupId: String =
     localProperties.getProperty("snap.lensGroupId", "").trim()
 val agoraAppId: String =
     localProperties.getProperty("agoraAppId", "").trim()
+/** Firestore `users/{uid}` that receives receiver-side call 💎 when streamers have no agent referral (treasury). */
+val companyDiamondAccountUid: String =
+    localProperties.getProperty("companyDiamondAccountUid", "").trim()
 
 android {
     namespace = "com.zipper.datingapp"
@@ -69,6 +72,9 @@ android {
         buildConfigField("String", "AGORA_APP_ID", "\"$safeAgoraAppId\"")
         /** Non-secret HTTPS URL that returns ICE JSON (see [IceConfigRepository]). Empty = STUN-only. */
         buildConfigField("String", "BACKEND_ICE_URL", "\"\"")
+        val safeCompanyDiamondUid =
+            companyDiamondAccountUid.replace("\\", "\\\\").replace("\"", "\\\"")
+        buildConfigField("String", "COMPANY_DIAMOND_ACCOUNT_UID", "\"$safeCompanyDiamondUid\"")
 
         manifestPlaceholders["snapCameraKitApiToken"] =
             snapCameraKitApiToken.ifEmpty { "" }

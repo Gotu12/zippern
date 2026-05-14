@@ -74,6 +74,8 @@ fun MessagesScreen(
     uiState: DatingUiState,
     isGuestPreview: Boolean = false,
     onGuestRestricted: () -> Unit = {},
+    /** Pull recent DM docs when this screen is shown so new threads appear without a cold restart. */
+    onEnsureInboxFresh: () -> Unit = {},
     onSendMessage: (String, String) -> Unit,
     onSendImageMessage: (String, Uri) -> Unit,
     onConsumeImageUploadError: () -> Unit,
@@ -89,6 +91,10 @@ fun MessagesScreen(
     var selectedPartner by remember { mutableStateOf<UserProfile?>(null) }
     val windowWidthClass = LocalWindowWidthClass.current
     val isExpanded = windowWidthClass == AppWindowWidthClass.Expanded
+
+    LaunchedEffect(Unit) {
+        onEnsureInboxFresh()
+    }
 
     // On expanded (two-pane), there is no full-screen chat to go "back" from.
     BackHandler(enabled = selectedPartner != null && !isExpanded) {

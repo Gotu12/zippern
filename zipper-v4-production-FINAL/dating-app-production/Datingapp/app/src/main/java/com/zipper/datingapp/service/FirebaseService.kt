@@ -2,6 +2,7 @@ package com.zipper.datingapp.service
 
 import android.net.Uri
 import android.util.Log
+import com.zipper.datingapp.BuildConfig
 import com.zipper.datingapp.data.*
 import com.zipper.datingapp.economy.VirtualEconomyMath
 import com.google.firebase.auth.FirebaseAuth
@@ -3087,8 +3088,7 @@ class FirebaseService {
                 val payerRef = usersCollection.document(payerUid)
                 val payerSnap = tx.get(payerRef)
                 if (!payerSnap.exists()) throw IllegalStateException("Payer missing")
-                val bal =
-                    (payerSnap.getLong("coins") ?: payerSnap.getLong("walletBalance"))?.toInt() ?: 0
+                val bal = payerSnap.effectiveSpendableDiamondsMerged()
                 val actual = minOf(rawTotal, bal.coerceAtLeast(0))
                 if (actual <= 0) return@runTransaction 0
                 val drift = -actual.toLong()
@@ -3102,7 +3102,7 @@ class FirebaseService {
                 actual
             }.await()
             if (charged > 0) {
-                creditCallReceiverBeansForDiamonds(payerUid, receiverUid, charged)
+                routeCallReceiverProceedsFromCharge(payerUid, receiverUid, charged)
             }
             Result.success(charged)
         } catch (e: Exception) {
@@ -3112,49 +3112,75 @@ class FirebaseService {
     }
 
     /**
-     * Credits beans to the call receiver from charged 💎 (truncated).
-     * **Male payer:** male receiver **30%**, female receiver **50%**; ambiguous receiver uses legacy receiver-only rates.
-     * **Other payers:** female receiver **50%**, male receiver **40%** (same as before).
-     * Female receivers also refresh [VirtualEconomyMath.femaleLevelFromBeans]; male receivers get beans only.
+     * Routes receiver-side proceeds from [chargeCallDiamondSession]:
+     * - Receiver **beans** only when they joined with an agent referral code **and** qualify as host/streamer.
+     * - Otherwise credits [BuildConfig.COMPANY_DIAMOND_ACCOUNT_UID] 💎 (`coins` + `walletBalance`) using the same 30/50/40 gender split as diamonds (truncated).
      */
-    suspend fun creditCallReceiverBeansForDiamonds(payerId: String, receiverId: String, diamondCost: Int) {
-        if (receiverId.isBlank() || diamondCost <= 0) return
+    private suspend fun routeCallReceiverProceedsFromCharge(payerUid: String, receiverUid: String, diamondCharged: Int) {
+        if (receiverUid.isBlank() || diamondCharged <= 0) return
         try {
             db.runTransaction { tx ->
-                val ref = usersCollection.document(receiverId)
-                val snap = tx.get(ref)
-                if (!snap.exists()) throw IllegalStateException("Receiver profile missing")
-                val receiverGender = snap.getString("gender")?.trim().orEmpty().ifBlank {
-                    snap.getString("genderText")?.trim().orEmpty()
-                }
-                val payerGender = if (payerId.isNotBlank()) {
-                    val payerSnap = tx.get(usersCollection.document(payerId))
-                    if (payerSnap.exists()) {
-                        payerSnap.getString("gender")?.trim().orEmpty().ifBlank {
-                            payerSnap.getString("genderText")?.trim().orEmpty()
-                        }
-                    } else {
-                        ""
+                val recvRef = usersCollection.document(receiverUid)
+                val payerRef = usersCollection.document(payerUid)
+                val recvSnap = tx.get(recvRef)
+                val payerSnap = tx.get(payerRef)
+                if (!recvSnap.exists()) throw IllegalStateException("Receiver profile missing")
+
+                val payerGender = payerSnap.primaryGenderRaw()
+                val recvGender = recvSnap.primaryGenderRaw()
+                val referralUsed = recvSnap.getString("referralCode")?.trim()?.isNotEmpty() == true
+                val streamerEligible = recvSnap.isEligibleHostStreamerReceiverMerged()
+
+                val pctPoints =
+                    VirtualEconomyMath.callReceiverSharePercentPointsForVideoCallSettlement(payerGender, recvGender)
+                val slice = (diamondCharged.toLong() * pctPoints) / 100L
+                if (slice <= 0L) return@runTransaction
+
+                val creditBeansToReceiver = referralUsed && streamerEligible
+                if (creditBeansToReceiver) {
+                    val prevBeans = recvSnap.getLong("beans") ?: 0L
+                    val updates = mutableMapOf<String, Any>("beans" to FieldValue.increment(slice))
+                    val recvGenderStr = recvGender.orEmpty()
+                    if (VirtualEconomyMath.isFemaleGender(recvGenderStr) &&
+                        !VirtualEconomyMath.isMaleGender(recvGenderStr)
+                    ) {
+                        updates["level"] = VirtualEconomyMath.femaleLevelFromBeans(prevBeans + slice)
                     }
+                    tx.update(recvRef, updates)
                 } else {
-                    ""
+                    val companyUid = BuildConfig.COMPANY_DIAMOND_ACCOUNT_UID.trim()
+                    if (companyUid.isEmpty()) {
+                        Log.w(
+                            tag,
+                            "routeCallReceiverProceedsFromCharge: COMPANY_DIAMOND_ACCOUNT_UID unset; " +
+                                "cannot credit treasury slice=$slice diamonds=$diamondCharged receiver=$receiverUid"
+                        )
+                        return@runTransaction
+                    }
+                    val cref = usersCollection.document(companyUid)
+                    val cSnap = tx.get(cref)
+                    val delta = FieldValue.increment(slice)
+                    val payload = mapOf(
+                        "coins" to delta,
+                        "walletBalance" to delta,
+                    )
+                    if (!cSnap.exists()) {
+                        tx.set(
+                            cref,
+                            hashMapOf<String, Any>(
+                                "coins" to slice,
+                                "walletBalance" to slice,
+                            ),
+                            SetOptions.merge(),
+                        )
+                    } else {
+                        tx.update(cref, payload)
+                    }
                 }
-                val delta = VirtualEconomyMath.callReceiverBeansEarned(
-                    diamondCost.toLong(),
-                    payerGender.takeIf { it.isNotBlank() },
-                    receiverGender.takeIf { it.isNotBlank() },
-                )
-                if (delta <= 0L) return@runTransaction
-                val prev = snap.getLong("beans") ?: 0L
-                val updates = mutableMapOf<String, Any>("beans" to FieldValue.increment(delta))
-                if (VirtualEconomyMath.isFemaleGender(receiverGender) && !VirtualEconomyMath.isMaleGender(receiverGender)) {
-                    updates["level"] = VirtualEconomyMath.femaleLevelFromBeans(prev + delta)
-                }
-                tx.update(ref, updates)
             }.await()
-            Log.d(tag, "creditCallReceiverBeansForDiamonds payer=$payerId receiver=$receiverId cost=$diamondCost")
+            Log.d(tag, "routeCallReceiverProceedsFromCharge payer=$payerUid receiver=$receiverUid charged=$diamondCharged")
         } catch (e: Exception) {
-            Log.w(tag, "creditCallReceiverBeansForDiamonds failed payer=$payerId receiver=$receiverId", e)
+            Log.w(tag, "routeCallReceiverProceedsFromCharge failed payer=$payerUid receiver=$receiverUid", e)
         }
     }
 
@@ -4201,6 +4227,31 @@ class FirebaseService {
         if (userId.isBlank()) return
         pkMatchesRef.child(userId).removeEventListener(listener)
     }
+}
+
+private fun DocumentSnapshot.effectiveSpendableDiamondsMerged(): Int {
+    val c = getLong("coins")
+    val w = getLong("walletBalance")
+    return when {
+        c != null && w != null -> maxOf(c, w).toInt().coerceAtLeast(0)
+        c != null -> c.toInt().coerceAtLeast(0)
+        w != null -> w.toInt().coerceAtLeast(0)
+        else -> 0
+    }
+}
+
+private fun DocumentSnapshot.primaryGenderRaw(): String? {
+    val g = getString("gender")?.trim().orEmpty().ifBlank {
+        getString("genderText")?.trim().orEmpty()
+    }
+    return g.takeIf { it.isNotEmpty() }
+}
+
+private fun DocumentSnapshot.isEligibleHostStreamerReceiverMerged(): Boolean {
+    val merged = toUserProfileMerged() ?: return false
+    if (merged.role == UserRole.GIRL) return true
+    if (merged.totalLiveMinutes + merged.totalStreamingMinutes > 0L) return true
+    return maxOf(merged.diamondsEarned, merged.gems) > 0
 }
 
 private suspend fun FirebaseService.normalizeProfileMediaUrls(profile: UserProfile): UserProfile {

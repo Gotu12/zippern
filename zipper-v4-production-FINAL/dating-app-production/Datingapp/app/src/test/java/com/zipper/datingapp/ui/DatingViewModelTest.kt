@@ -46,6 +46,30 @@ class DatingViewModelTest {
     }
 
     @Test
+    fun callReceiverSharePercentPoints_sameGender_is30() {
+        assertEquals(
+            30L,
+            VirtualEconomyMath.callReceiverSharePercentPointsForVideoCallSettlement("male", "male"),
+        )
+        assertEquals(
+            30L,
+            VirtualEconomyMath.callReceiverSharePercentPointsForVideoCallSettlement("female", "female"),
+        )
+    }
+
+    @Test
+    fun callReceiverSharePercentPoints_maleToFemale_is50_femaleToMale_is40() {
+        assertEquals(
+            50L,
+            VirtualEconomyMath.callReceiverSharePercentPointsForVideoCallSettlement("male", "female"),
+        )
+        assertEquals(
+            40L,
+            VirtualEconomyMath.callReceiverSharePercentPointsForVideoCallSettlement("female", "male"),
+        )
+    }
+
+    @Test
     fun maleGiverLevel_reaches4At1MSpend() {
         assertEquals(4, VirtualEconomyMath.maleGiverLevelFromGiftSpend(1_000_000L))
         assertEquals(3, VirtualEconomyMath.maleGiverLevelFromGiftSpend(999_999L))

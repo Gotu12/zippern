@@ -922,11 +922,6 @@ fun VideoCallScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        LuxuryEndCallButton(onClick = requestEndCall)
-                        Spacer(Modifier.height(6.dp))
-                        Text("End", color = ItzoUiTokens.CallDecline, fontSize = 11.sp)
-                    }
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         LuxuryGlassCircleButton(
                             icon = if (isSpeakerOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
                             contentDescription = if (isSpeakerOn) "Speaker on" else "Speaker off",
@@ -958,6 +953,17 @@ fun VideoCallScreen(
                         Spacer(Modifier.height(6.dp))
                         Text(if (isMuted) "Unmute" else "Mute", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp)
                     }
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        LuxuryGlassCircleButton(
+                            icon = if (isFrontCamera) Icons.Default.FlipCameraAndroid else Icons.Default.FlipCameraIos,
+                            contentDescription = stringResource(R.string.call_flip_camera),
+                            onClick = onSwitchCamera,
+                            enabled = mediaPermissionsState.allPermissionsGranted && isCameraOn && callState == CallState.ACTIVE,
+                            iconEmphasized = !isFrontCamera
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text("Flip", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp)
+                    }
                     if (callState == CallState.ACTIVE && isVideoButton) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             LuxuryProminentGiftButton(
@@ -974,15 +980,14 @@ fun VideoCallScreen(
                         }
                     }
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        LuxuryGlassCircleButton(
-                            icon = if (isFrontCamera) Icons.Default.FlipCameraAndroid else Icons.Default.FlipCameraIos,
-                            contentDescription = stringResource(R.string.call_flip_camera),
-                            onClick = onSwitchCamera,
-                            enabled = mediaPermissionsState.allPermissionsGranted && isCameraOn && callState == CallState.ACTIVE,
-                            iconEmphasized = !isFrontCamera
-                        )
+                        LuxuryEndCallButton(onClick = requestEndCall)
                         Spacer(Modifier.height(6.dp))
-                        Text("Flip", color = Color.White.copy(alpha = 0.7f), fontSize = 11.sp)
+                        Text(
+                            stringResource(R.string.call_decline_label),
+                            color = Color.White.copy(alpha = 0.85f),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
                 }
                 }
@@ -1970,8 +1975,17 @@ private fun LuxuryEndCallButton(
     Box(
         modifier = modifier
             .size(56.dp)
+            .border(BorderStroke(1.25.dp, Color.White.copy(alpha = 0.42f)), CircleShape)
             .clip(CircleShape)
-            .background(ItzoUiTokens.CallDecline)
+            .background(
+                brush = Brush.verticalGradient(
+                    colors = listOf(
+                        ItzoUiTokens.CallDecline.copy(alpha = 0.94f),
+                        ItzoUiTokens.CallDecline.copy(alpha = 0.68f),
+                    ),
+                ),
+                shape = CircleShape,
+            )
             .clickable { onClick() },
         contentAlignment = Alignment.Center
     ) {
@@ -1979,7 +1993,7 @@ private fun LuxuryEndCallButton(
             imageVector = Icons.Default.CallEnd,
             contentDescription = stringResource(R.string.call_end_stream),
             tint = Color.White,
-            modifier = Modifier.size(28.dp)
+            modifier = Modifier.size(26.dp)
         )
     }
 }

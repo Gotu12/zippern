@@ -17,6 +17,7 @@ import com.zipper.datingapp.call.CallStatus
 import com.zipper.datingapp.auth.AuthRepository
 import com.zipper.datingapp.data.*
 import com.zipper.datingapp.service.FirebaseService
+import com.zipper.datingapp.service.dmChatId
 import com.zipper.datingapp.service.IncomingCallInvite
 import com.zipper.datingapp.service.PkMatchResult
 import com.zipper.datingapp.service.GiftTransferResult
@@ -1234,6 +1235,37 @@ class DatingViewModel : ViewModel() {
         }
     }
 
+    /** Refresh DM inbox threads from Firestore (re-run after login prefetch). Safe to call when opening Messages. */
+    fun refreshGlobalMessageInbox() {
+        scheduleGlobalInboxPrefetch()
+    }
+
+    private fun mergeOutboundThread(peerId: String, message: Message) {
+        val pid = peerId.trim()
+        if (pid.isEmpty()) return
+        val uid = auth.currentUser?.uid?.trim().orEmpty()
+        val resolvedChatId =
+            if (uid.isNotEmpty()) dmChatId(uid, pid).trim() else message.chatId.trim()
+        val enriched =
+            message.copy(chatId = resolvedChatId.ifBlank { message.chatId.trim() })
+        _uiState.update { st ->
+            val cur = st.messages[pid].orEmpty()
+            val next =
+                if (cur.any { it.id == enriched.id }) cur
+                else (cur + enriched).distinctBy { it.id }.sortedBy { it.timestamp }
+            val mergedMap = st.messages.toMutableMap()
+            mergedMap[pid] = next
+            val dmMap = st.dmThreadProfiles.toMutableMap()
+            if (!dmMap.containsKey(pid)) {
+                val hint = st.chatPartnerProfile?.takeIf { it.id == pid }
+                    ?: st.profiles.find { it.id == pid }
+                    ?: st.filteredProfiles.find { it.id == pid }
+                if (hint != null) dmMap[pid] = hint
+            }
+            st.copy(messages = mergedMap, dmThreadProfiles = dmMap)
+        }
+    }
+
     fun logout(context: Context) {
         val uid = auth.currentUser?.uid
         if (uid != null && _uiState.value.isLive) {
@@ -1690,10 +1722,15 @@ class DatingViewModel : ViewModel() {
                 )
             }
 
-            firebaseService.sendMessage(message).onFailure { e ->
+            firebaseService.sendMessage(message).fold(
+                onSuccess = {
+                    mergeOutboundThread(uid.trim(), message)
+                },
+                onFailure = { e ->
                     Log.e("DatingViewModel", "sendMessage failed", e)
                     _uiState.update { it.copy(loginError = "Message failed: ${e.message}") }
-                }
+                },
+            )
             } catch (e: Exception) {
                 Log.e("DatingViewModel", "sendMessage failed", e)
                 _uiState.update { it.copy(loginError = "Message failed: ${e.message}") }
@@ -1713,17 +1750,17 @@ class DatingViewModel : ViewModel() {
         viewModelScope.launch {
             runCatching {
                 val imageUrl = firebaseService.normalizeImageReference(imageUri.toString())
-                firebaseService.sendMessage(
-                    Message(
-                        id = UUID.randomUUID().toString(),
-                        senderId = cid,
-                        receiverId = uid,
-                        text = "Photo",
-                        type = "image",
-                        giftImageUrl = imageUrl,
-                        timestamp = System.currentTimeMillis()
-                    )
-                ).getOrThrow()
+                val outgoing = Message(
+                    id = UUID.randomUUID().toString(),
+                    senderId = cid,
+                    receiverId = uid,
+                    text = "Photo",
+                    type = "image",
+                    giftImageUrl = imageUrl,
+                    timestamp = System.currentTimeMillis()
+                )
+                firebaseService.sendMessage(outgoing).getOrThrow()
+                mergeOutboundThread(uid.trim(), outgoing)
             }.onFailure { err ->
                 _uiState.update {
                     it.copy(
@@ -1753,25 +1790,27 @@ class DatingViewModel : ViewModel() {
         val cid = auth.currentUser?.uid ?: return
         viewModelScope.launch {
             val displayName = gift.name.trim().ifBlank { "Gift" }
-            firebaseService.sendMessage(
-                Message(
-                    id = UUID.randomUUID().toString(),
-                    senderId = cid,
-                    receiverId = uid,
-                    // Store the specific gift name so the receiving side can render
-                    // "Sent a Virtual Rose 🌹" without needing a catalog lookup.
-                    text = displayName,
-                    type = "gift",
-                    giftId = gift.id,
-                    // Use thumbnailUrl (static image) only — never fall back to videoUrl,
-                    // which is a video asset and would fail silently in AsyncImage.
-                    giftImageUrl = gift.thumbnailUrl.ifBlank { null },
-                    timestamp = System.currentTimeMillis()
-                )
-            ).onFailure { e ->
-                Log.e("DatingViewModel", "sendGiftMessage", e)
-                _uiState.update { it.copy(loginError = "Gift message failed: ${e.message}") }
-            }
+            val outgoing = Message(
+                id = UUID.randomUUID().toString(),
+                senderId = cid,
+                receiverId = uid,
+                // Store the specific gift name so the receiving side can render
+                // "Sent a Virtual Rose 🌹" without needing a catalog lookup.
+                text = displayName,
+                type = "gift",
+                giftId = gift.id,
+                // Use thumbnailUrl (static image) only — never fall back to videoUrl,
+                // which is a video asset and would fail silently in AsyncImage.
+                giftImageUrl = gift.thumbnailUrl.ifBlank { null },
+                timestamp = System.currentTimeMillis()
+            )
+            firebaseService.sendMessage(outgoing).fold(
+                onSuccess = { mergeOutboundThread(uid.trim(), outgoing) },
+                onFailure = { e ->
+                    Log.e("DatingViewModel", "sendGiftMessage", e)
+                    _uiState.update { it.copy(loginError = "Gift message failed: ${e.message}") }
+                },
+            )
         }
     }
 
