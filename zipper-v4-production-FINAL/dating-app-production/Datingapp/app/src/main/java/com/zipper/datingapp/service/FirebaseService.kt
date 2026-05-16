@@ -2092,7 +2092,9 @@ class FirebaseService {
             runCatching { clearLiveStreamPkBannerIfDocumentExists(id) }
                 .onFailure { e -> Log.w(tag, "endLiveStream clearPkBanner live_streams/$id", e) }
         }
+        var liveFlagCleared = false
         runCatching { updateUserLiveStatus(hostUid, false, null) }
+            .onSuccess { liveFlagCleared = true }
             .onFailure { Log.w(tag, "endLiveStream updateUserLiveStatus uid=$hostUid", it) }
         for (id in docIds) {
             runCatching {
@@ -2103,6 +2105,10 @@ class FirebaseService {
                 streamsCollection.document(id).delete().await()
                 Log.d(tag, "endLiveStream: deleted streams/$id")
             }.onFailure { Log.w(tag, "endLiveStream delete streams/$id", it) }
+        }
+        if (!liveFlagCleared) {
+            runCatching { updateUserLiveStatus(hostUid, false, null) }
+                .onFailure { Log.w(tag, "endLiveStream updateUserLiveStatus retry-after-delete uid=$hostUid", it) }
         }
     }
 
@@ -2556,6 +2562,40 @@ class FirebaseService {
                     }
                     .awaitAll()
                     .toMap(LinkedHashMap())
+            }
+        }
+    }
+
+    /**
+     * Host UIDs whose `live_streams/{id}` doc still exists (prefer [Source.SERVER] to avoid cache ghosts).
+     * Used with [observeLiveUserIds] so cards disappear when `users.isLive` is stale but the stream doc was deleted.
+     */
+    suspend fun hostIdsWithLiveStreamDocuments(hostIds: Collection<String>): Set<String> {
+        val ids = hostIds.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        if (ids.isEmpty()) return emptySet()
+        return withContext(Dispatchers.IO) {
+            coroutineScope {
+                ids
+                    .map { id ->
+                        async {
+                            val onServer = runCatching {
+                                liveStreamsCollection.document(id).get(Source.SERVER).await()
+                            }
+                            when {
+                                onServer.isSuccess && onServer.getOrNull()?.exists() == true -> id
+                                onServer.isSuccess -> null
+                                else -> {
+                                    val fallback = runCatching {
+                                        liveStreamsCollection.document(id).get(Source.DEFAULT).await()
+                                    }.getOrNull()
+                                    if (fallback?.exists() == true) id else null
+                                }
+                            }
+                        }
+                    }
+                    .awaitAll()
+                    .filterNotNull()
+                    .toSet()
             }
         }
     }

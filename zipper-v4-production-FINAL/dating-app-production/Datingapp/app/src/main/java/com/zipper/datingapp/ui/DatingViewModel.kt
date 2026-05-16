@@ -76,6 +76,14 @@ sealed class LiveDiscoverNotice {
     data class PkStarted(val summaryLine: String) : LiveDiscoverNotice()
 }
 
+private data class LiveDiscoveryMergeInputs(
+    val profiles: List<UserProfile>,
+    /** UIDs from Firestore `users` where `isLive` == true. */
+    val liveQueryIds: Set<String>,
+    val presenceRtdb: Map<String, Boolean>,
+    val pkBanners: Map<String, String>,
+)
+
 data class DatingUiState(
     val currentUser: UserProfile? = null,
     val profiles: List<UserProfile> = emptyList(),
@@ -632,29 +640,51 @@ class DatingViewModel : ViewModel() {
                 firebaseService.observeGlobalPresenceRtdb(),
                 firebaseService.observeActiveLivePkBanners()
             ) { profiles, liveIds, presenceRtdb, pkBanners ->
-                val pkHostIds = pkBanners.keys
-                val profileIds = profiles.map { it.id }.toSet()
-                val enriched = profiles.map { p ->
-                    val rtdb = presenceRtdb[p.id]
+                LiveDiscoveryMergeInputs(
+                    profiles = profiles,
+                    liveQueryIds = liveIds,
+                    presenceRtdb = presenceRtdb,
+                    pkBanners = pkBanners,
+                )
+            }
+                .debounce(250L)
+                .collect { input ->
+                val pkHostIds = input.pkBanners.keys
+                val validatedStreamHosts = runCatching {
+                    withContext(Dispatchers.IO) {
+                        var v = firebaseService.hostIdsWithLiveStreamDocuments(input.liveQueryIds)
+                        if (input.liveQueryIds.any { it !in v }) {
+                            delay(400)
+                            v = firebaseService.hostIdsWithLiveStreamDocuments(input.liveQueryIds)
+                        }
+                        v
+                    }
+                }.getOrElse { e ->
+                    Log.w("DatingViewModel", "hostIdsWithLiveStreamDocuments", e)
+                    input.liveQueryIds
+                }
+                val profileIds = input.profiles.map { it.id }.toSet()
+                val enriched = input.profiles.map { p ->
+                    val rtdb = input.presenceRtdb[p.id]
                     val online = rtdb ?: p.isOnline
-                    // OR with doc flag: if the isLive=true query fails (rules/index), hosts still appear live.
-                    val mergedLive = (p.id in liveIds) || p.isLive
+                    val mergedLive =
+                        (p.id in input.liveQueryIds && p.id in validatedStreamHosts) ||
+                            (p.id in pkHostIds)
                     p.copy(isLive = mergedLive, isOnline = online)
                 }
-                val missingIds = (liveIds + pkHostIds).filter { it !in profileIds }.distinct()
+                val missingIds = (input.liveQueryIds + pkHostIds).filter { it !in profileIds }.distinct()
                 val extras = missingIds.map { id ->
-                    val rtdb = presenceRtdb[id]
+                    val rtdb = input.presenceRtdb[id]
                     UserProfile(
                         id = id,
                         name = "Live",
-                        isLive = (id in liveIds) || (id in pkHostIds),
+                        isLive =
+                            (id in input.liveQueryIds && id in validatedStreamHosts) ||
+                                (id in pkHostIds),
                         isOnline = rtdb ?: true
                     )
                 }
-                enriched + extras
-            }
-                .debounce(250L)
-                .collect { incoming ->
+                val incoming = enriched + extras
                 val liveHostIds = incoming.filter { it.isLive }.map { it.id }.distinct()
                 val audioOnlyFlags = if (liveHostIds.isEmpty()) {
                     emptyMap()
