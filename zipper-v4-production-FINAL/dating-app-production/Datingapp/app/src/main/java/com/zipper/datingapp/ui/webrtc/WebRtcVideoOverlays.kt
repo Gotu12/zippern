@@ -50,6 +50,8 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.CardGiftcard
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.FlipCameraIos
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -1448,61 +1450,100 @@ fun WebRtcOverlayTopBar(
     itzoVideoCallBar: Boolean = false,
     /** When [itzoVideoCallBar] is true, second-leading action (e.g. [android.app.Activity.moveTaskToBack]). */
     onMinimizeCall: (() -> Unit)? = null,
+    payerDiamondBalance: Int = -1,
+    payerDiamondRatePerMinute: Int = 0,
+    onLikePartner: (() -> Unit)? = null,
+    partnerIsLiked: Boolean = false,
 ) {
     if (itzoVideoCallBar && onLeaveStream != null) {
-        Surface(
-            modifier = modifier.fillMaxWidth(),
-            color = Color.Transparent,
-            shadowElevation = 0.dp,
+        Row(
+            modifier = modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
+            Surface(
+                modifier = Modifier.size(44.dp),
+                shape = CircleShape,
+                color = Color.White.copy(alpha = 0.18f),
+                border = BorderStroke(1.5.dp, Color.White.copy(alpha = 0.35f)),
             ) {
-                IconButton(
-                    onClick = onLeaveStream,
-                    modifier = Modifier.size(44.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = stringResource(R.string.profile_sheet_back_cd),
-                        tint = Color.White,
+                if (avatarUrl.isNotBlank()) {
+                    AsyncImage(
+                        model = avatarUrl,
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize().clip(CircleShape),
+                        contentScale = ContentScale.Crop,
                     )
                 }
-                if (onMinimizeCall != null) {
-                    IconButton(
-                        onClick = onMinimizeCall,
-                        modifier = Modifier.size(44.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.KeyboardArrowDown,
-                            contentDescription = stringResource(R.string.call_minimize_cd),
-                            tint = Color.White,
-                        )
-                    }
-                } else {
-                    Spacer(Modifier.size(44.dp))
-                }
-                val title = displayName.ifBlank { stringResource(R.string.call_overlay_title) }
-                val timerSuffix =
-                    if (sessionElapsedSeconds >= 0) {
-                        " · ${formatCallDurationClock(sessionElapsedSeconds)}"
-                    } else {
-                        ""
-                    }
+            }
+            val itzoCallDisplayName = displayName.ifBlank { stringResource(R.string.call_overlay_title) }
+                .let { if (it.length > 12) it.take(12).trimEnd() + "…" else it }
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = title + timerSuffix,
-                    modifier = Modifier.weight(1f),
+                    text = itzoCallDisplayName,
                     color = Color.White,
-                    fontSize = 16.sp,
+                    fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    textAlign = TextAlign.Center,
                 )
-                Spacer(Modifier.width(88.dp))
+                if (sessionElapsedSeconds >= 0) {
+                    Text(
+                        text = formatCallDurationClock(sessionElapsedSeconds),
+                        color = Color(0xFF4ADE80),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+            }
+            if (onLikePartner != null) {
+                IconButton(
+                    onClick = onLikePartner,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .background(
+                            if (partnerIsLiked) Color(0x44FF6B9D) else Color.White.copy(alpha = 0.15f),
+                            CircleShape,
+                        ),
+                ) {
+                    Icon(
+                        imageVector = if (partnerIsLiked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                        contentDescription = "Like",
+                        tint = Color(0xFFFF6B9D),
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+            }
+            if (payerDiamondBalance >= 0) {
+                Surface(
+                    shape = RoundedCornerShape(50),
+                    color = Color(0xFF1A1A2E).copy(alpha = 0.88f),
+                    border = BorderStroke(1.dp, Color(0xFFFFC400).copy(alpha = 0.6f)),
+                    modifier = Modifier.widthIn(min = 76.dp),
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(
+                            text = "💎 $payerDiamondBalance",
+                            color = Color(0xFFFFC400),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                        )
+                        if (payerDiamondRatePerMinute > 0) {
+                            Text(
+                                text = "$payerDiamondRatePerMinute/min",
+                                color = Color.White.copy(alpha = 0.7f),
+                                fontSize = 10.sp,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                }
             }
         }
         return
@@ -2312,39 +2353,35 @@ fun WebRtcOverlayBottomChat(
                                     )
                                 }
                             }
+                            if (endCallInItzoRow) {
+                                val end = onEndCall!!
+                                Box(
+                                    modifier = Modifier
+                                        .size(56.dp)
+                                        .shadow(8.dp, CircleShape)
+                                        .clip(CircleShape)
+                                        .background(ItzoUiTokens.CallDecline)
+                                        .clickable(onClick = end),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CallEnd,
+                                        contentDescription = endCallLabel,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(30.dp),
+                                    )
+                                }
+                            }
                         }
                         if (itzoDock) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 24.dp, vertical = 20.dp),
+                                    .padding(horizontal = 8.dp, vertical = 12.dp),
+                                horizontalArrangement = Arrangement.SpaceEvenly,
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Row(
-                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    LiveCallControlCluster()
-                                }
-                                Spacer(Modifier.weight(1f))
-                                val end = onEndCall
-                                if (end != null) {
-                                    IconButton(
-                                        onClick = end,
-                                        modifier = Modifier
-                                            .size(64.dp)
-                                            .shadow(8.dp, CircleShape)
-                                            .clip(CircleShape)
-                                            .background(ItzoUiTokens.CallDecline),
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.CallEnd,
-                                            contentDescription = endCallLabel,
-                                            tint = Color.White,
-                                            modifier = Modifier.size(36.dp)
-                                        )
-                                    }
-                                }
+                                LiveCallControlCluster()
                             }
                         } else {
                             Row(

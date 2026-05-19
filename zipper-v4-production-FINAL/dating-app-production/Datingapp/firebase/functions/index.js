@@ -856,3 +856,49 @@ exports.getTurnCredentials = functions.region(FS_REGION).https.onCall((data, con
     "TURN server is not configured",
   );
 });
+
+/** Ghost live: clear users + delete stream docs when host heartbeats stop (app kill / force stop). */
+const STALE_LIVE_MS = 120 * 1000;
+
+async function teardownStaleLiveHost(hostUid, streamDocId) {
+  const streamId = String(streamDocId || hostUid).trim() || hostUid;
+  await db.collection("users").doc(hostUid).set(
+    { isLive: false, liveRoomId: FieldValue.delete() },
+    { merge: true },
+  );
+  await db.collection("live_streams").doc(streamId).delete().catch(() => {});
+  await db.collection("streams").doc(streamId).delete().catch(() => {});
+  console.log(`cleanupStaleLiveStreams: tore down host=${hostUid} stream=${streamId}`);
+}
+
+exports.cleanupStaleLiveStreams = functions
+  .region(FS_REGION)
+  .pubsub.schedule("every 2 minutes")
+  .onRun(async () => {
+    const now = Date.now();
+    const cutoff = now - STALE_LIVE_MS;
+    const usersSnap = await db.collection("users").where("isLive", "==", true).limit(80).get();
+    let cleaned = 0;
+    for (const userDoc of usersSnap.docs) {
+      const hostUid = userDoc.id;
+      const liveRoomId = String((userDoc.data() || {}).liveRoomId || "").trim();
+      const streamId = liveRoomId || hostUid;
+      const streamSnap = await db.collection("live_streams").doc(streamId).get();
+      if (!streamSnap.exists) {
+        await teardownStaleLiveHost(hostUid, streamId);
+        cleaned += 1;
+        continue;
+      }
+      const data = streamSnap.data() || {};
+      const heartbeat = Number(data.hostHeartbeatAtMs || 0);
+      const updated = Number(data.updatedAtMs || 0);
+      const started = Number(data.streamStartedAtMillis || 0);
+      const last = Math.max(heartbeat, updated, started);
+      if (last > 0 && last < cutoff) {
+        await teardownStaleLiveHost(hostUid, streamId);
+        cleaned += 1;
+      }
+    }
+    console.log(`cleanupStaleLiveStreams: scanned=${usersSnap.size} cleaned=${cleaned}`);
+    return null;
+  });

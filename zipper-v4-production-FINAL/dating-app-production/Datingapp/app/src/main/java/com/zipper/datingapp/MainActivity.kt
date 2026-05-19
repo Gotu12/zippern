@@ -286,6 +286,12 @@ class MainActivity : AppCompatActivity() {
                         viewModel.clearLiveGiftMessage()
                     }
                 }
+                LaunchedEffect(uiState.showCoinTopUpForGift) {
+                    if (uiState.showCoinTopUpForGift) {
+                        showDiamondShop = true
+                        viewModel.clearShowCoinTopUpForGift()
+                    }
+                }
                 LaunchedEffect(uiState.loginError, uiState.isLoggedIn) {
                     val err = uiState.loginError ?: return@LaunchedEffect
                     if (!uiState.isLoggedIn) return@LaunchedEffect
@@ -774,6 +780,7 @@ class MainActivity : AppCompatActivity() {
                             onSendOtp = { phone, activity -> viewModel.sendOtp(phone, activity) },
                             onVerifyOtp = { code -> viewModel.verifyOtp(code) },
                             onGoogleSignIn = { token -> viewModel.signInWithGoogle(token) },
+                            onGoogleSignInFailure = { error -> viewModel.reportLoginFailure(error) },
                             onSelectGender = { gender -> viewModel.setRegistrationGender(gender) },
                             onGuestLogin = { viewModel.loginAsGuest() },
                             onUseAnotherAccount = { viewModel.useAnotherAccount(this@MainActivity) },
@@ -946,7 +953,11 @@ class MainActivity : AppCompatActivity() {
                             callState = uiState.callState,
                             callStatus = uiState.callStatus,
                             isIncomingCall = uiState.isIncomingCall,
-                            onAcceptCall = { viewModel.acceptCall() },
+                            onAcceptCall = {
+                                NotificationManagerCompat.from(context)
+                                    .cancel(CallFirebaseMessagingService.NOTIF_INCOMING_CALL)
+                                viewModel.acceptCall()
+                            },
                             onToggleMic = { enabled ->
                                 WebRTCManager.activeManager()?.setAudioEnabled(enabled)
                             },

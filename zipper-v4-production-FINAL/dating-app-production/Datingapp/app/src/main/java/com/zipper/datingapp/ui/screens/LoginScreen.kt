@@ -103,6 +103,7 @@ fun LoginScreen(
     onSendOtp: (String, Activity) -> Unit,
     onVerifyOtp: (String) -> Unit,
     onGoogleSignIn: (String) -> Unit,
+    onGoogleSignInFailure: (Throwable) -> Unit = {},
     onSelectGender: (String) -> Unit,
     onGuestLogin: () -> Unit,
     onUseAnotherAccount: () -> Unit,
@@ -135,6 +136,7 @@ fun LoginScreen(
                 account.idToken?.let { onGoogleSignIn(it) }
             } catch (e: ApiException) {
                 Log.e("LoginScreen", "Google sign in failed status=${e.statusCode}", e)
+                onGoogleSignInFailure(e)
             }
         }
     }

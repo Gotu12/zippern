@@ -1000,23 +1000,35 @@ fun VideoCallScreen(
                 stringResource(R.string.live_pk_spectators_chip_host, pkHostViewerCount)
             val pkGuestSpectatorsChipLabel =
                 stringResource(R.string.live_pk_spectators_chip_challenger, pkGuestViewerCount)
+            val itzoPrivateVideoBar = liveGlassBottomSheet
+            val callRatePerMinute =
+                if (isVideoButton) {
+                    partner.customVideoPrice ?: VirtualEconomyMath.DEFAULT_CALL_VIDEO_DIAMONDS_PER_MIN
+                } else {
+                    partner.customAudioPrice ?: VirtualEconomyMath.DEFAULT_CALL_AUDIO_DIAMONDS_PER_MIN
+                }
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .zIndex(45f)
             ) {
                 WebRtcOverlayTopBar(
-                    displayName = overlayHostDisplayName,
-                    avatarUrl = overlayHostAvatarUrl,
+                    displayName = overlayHostDisplayName.ifBlank { partner.name },
+                    avatarUrl = overlayHostAvatarUrl.ifBlank { partner.photoUrl },
                     followerCount = overlayHostFollowerCount,
                     viewerCount = liveViewerCount,
-                    showBroadcastMetrics = webrtcOverlayShowBroadcastMetrics,
+                    showBroadcastMetrics = webrtcOverlayShowBroadcastMetrics && !itzoPrivateVideoBar,
                     showLiveViewerCount = !pkNeonPanelActive,
                     sessionElapsedSeconds = callDuration,
                     onLeaveStream = requestEndCall,
+                    itzoVideoCallBar = itzoPrivateVideoBar,
+                    payerDiamondBalance =
+                        if (itzoPrivateVideoBar && isCallDiamondPayer) coinBalance else -1,
+                    payerDiamondRatePerMinute =
+                        if (itzoPrivateVideoBar && isCallDiamondPayer) callRatePerMinute else 0,
                     modifier = Modifier
                         .align(Alignment.TopStart)
-                        .padding(top = 96.dp)
+                        .padding(top = if (itzoPrivateVideoBar) 48.dp else 96.dp)
                         .zIndex(6f)
                         .onGloballyPositioned { coords ->
                             pipMeasureWebrtcTopChromeBottomYWindow =
@@ -1110,6 +1122,9 @@ fun VideoCallScreen(
                     // Same chrome for paid private 1:1 and marketing teaser ([isFreeTeaserCall]): flags/modifiers above do not branch on teaser.
                     showComplianceBanner = pkNeonPanelActive || liveGlassBottomSheet,
                     bottomSheetComposer = !pkNeonPanelActive,
+                    transparentDockPanel = !pkNeonPanelActive,
+                    itzoStandardCallDock = !pkNeonPanelActive,
+                    skipNavigationBarsInset = true,
                 )
             }
             if (showPkToolsSheet) {
@@ -1527,7 +1542,8 @@ fun VideoCallScreen(
                         .zIndex(60f)
                 )
             }
-            callState == CallState.ACTIVE && isCallDiamondPayer && !isFreeTeaserCall -> {
+            callState == CallState.ACTIVE && isCallDiamondPayer && !isFreeTeaserCall &&
+                !(showVideoCallGlassChrome && liveGlassBottomSheet) -> {
                 val rate = if (isVideoButton) {
                     partner.customVideoPrice ?: VirtualEconomyMath.DEFAULT_CALL_VIDEO_DIAMONDS_PER_MIN
                 } else {
@@ -1544,7 +1560,8 @@ fun VideoCallScreen(
                         .zIndex(60f)
                 )
             }
-            callState == CallState.ACTIVE && !isFreeTeaserCall -> {
+            callState == CallState.ACTIVE && !isFreeTeaserCall &&
+                !(showVideoCallGlassChrome && liveGlassBottomSheet) -> {
                 CallElapsedTimeAndBalanceBar(
                     elapsedSeconds = callDuration,
                     diamondBalance = coinBalance,

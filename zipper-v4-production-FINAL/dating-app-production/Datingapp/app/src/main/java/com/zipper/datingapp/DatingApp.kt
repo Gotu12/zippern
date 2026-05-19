@@ -3,6 +3,8 @@ package com.zipper.datingapp
 import android.app.ActivityManager
 import android.app.Application
 import android.content.Context
+import android.content.Intent
+import android.content.res.Configuration
 import android.os.StrictMode
 import android.util.Log
 import androidx.lifecycle.Lifecycle
@@ -14,6 +16,7 @@ import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import com.google.firebase.crashlytics.FirebaseCrashlytics
 import com.zipper.datingapp.BuildConfig
+import com.zipper.datingapp.service.LiveTaskCleanupService
 import com.zipper.datingapp.webrtc.IceConfigRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -61,6 +64,14 @@ class DatingApp : Application() {
         }
     }
 
+    override fun attachBaseContext(base: Context) {
+        val config = Configuration(base.resources.configuration)
+        if (config.fontScale != 1.0f) {
+            config.fontScale = 1.0f
+        }
+        super.attachBaseContext(base.createConfigurationContext(config))
+    }
+
     override fun onCreate() {
         if (BuildConfig.DEBUG) {
             StrictMode.setThreadPolicy(
@@ -81,6 +92,9 @@ class DatingApp : Application() {
         }
         super.onCreate()
         DatingApp.applicationContext = applicationContext
+        runCatching {
+            startService(Intent(this, LiveTaskCleanupService::class.java))
+        }.onFailure { Log.w("DatingApp", "start LiveTaskCleanupService", it) }
         // Production crash reports; disable in debug to keep the Crashlytics dashboard clean during development.
         runCatching {
             FirebaseCrashlytics.getInstance().isCrashlyticsCollectionEnabled = !BuildConfig.DEBUG

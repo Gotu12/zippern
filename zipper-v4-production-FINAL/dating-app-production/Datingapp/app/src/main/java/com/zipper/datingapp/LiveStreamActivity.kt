@@ -88,6 +88,7 @@ import com.zipper.datingapp.data.PkBattleSessionState
 import com.zipper.datingapp.data.PK_POST_RESULT_LINGER_MS
 import com.zipper.datingapp.data.UserProfile
 import com.zipper.datingapp.economy.VirtualEconomyMath
+import com.zipper.datingapp.service.CallFirebaseMessagingService
 import com.zipper.datingapp.service.FirebaseService
 import com.zipper.datingapp.service.LiveEconomyGiftResult
 import com.zipper.datingapp.data.Gift
@@ -286,6 +287,9 @@ class LiveStreamActivity : ComponentActivity() {
     private var callElapsedTickJob: Job? = null
     private val walletDiamondBalance = MutableStateFlow(0)
     private val callDiamondRatePerMinute = MutableStateFlow(VirtualEconomyMath.DEFAULT_CALL_VIDEO_DIAMONDS_PER_MIN)
+    /** Chamet-style billing: first minute on connect, then every 59 s. */
+    private var realtimeBillingJob: Job? = null
+    private var realtimeBillingRan = false
     private val callStatusForUi = MutableStateFlow(CallStatus.CONNECTING)
     private val showGiftPickerSheet = MutableStateFlow(false)
     /** PK session: audience / battlers pick host vs guest before sending (gifts drive PK score). */
@@ -371,6 +375,10 @@ class LiveStreamActivity : ComponentActivity() {
             "CALL_CHAT_UI",
             "surface=LiveStreamActivity room=${roomId!!} isPk=$isPkSession isVideoCall=$isVideoCall isStreamer=$isStreamer version=${BuildConfig.VERSION_NAME}(${BuildConfig.VERSION_CODE})"
         )
+
+        androidx.core.app.NotificationManagerCompat.from(this)
+            .cancel(CallFirebaseMessagingService.NOTIF_INCOMING_CALL)
+
         bindPrivateCallForProcessTeardown(roomId!!, isPkSession)
 
         liveStreamBinding = ActivityLiveStreamBinding.inflate(layoutInflater)
@@ -970,10 +978,13 @@ class LiveStreamActivity : ComponentActivity() {
                 val profile by liveHostProfile.collectAsStateWithLifecycle()
                 val viewers by liveViewerCount.collectAsStateWithLifecycle()
                 val elapsedTop by callElapsedSeconds.collectAsStateWithLifecycle()
+                val walletTop by walletDiamondBalance.collectAsStateWithLifecycle()
+                val rateTop by callDiamondRatePerMinute.collectAsStateWithLifecycle()
                 val displayName = profile?.name?.takeIf { it.isNotBlank() } ?: overlayPeerName
                 val avatar = profile?.photoUrl?.takeIf { it.isNotBlank() } ?: overlayPeerPhoto
                 val followers = profile?.followerIds?.size ?: 0
                 val itzoStandardVideoCall = !isPkSession && isVideoCall
+                var partnerIsLiked by remember { mutableStateOf(false) }
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -995,6 +1006,29 @@ class LiveStreamActivity : ComponentActivity() {
                         } else {
                             null
                         },
+                        onLikePartner = if (itzoStandardVideoCall && overlayPeerId.isNotBlank()) {
+                            {
+                                partnerIsLiked = !partnerIsLiked
+                                val currentUid = FirebaseAuth.getInstance().currentUser?.uid
+                                if (currentUid != null) {
+                                    lifecycleScope.launch {
+                                        runCatching {
+                                            firebaseService.toggleDiscoveryProfileLike(
+                                                currentUid,
+                                                overlayPeerId.trim(),
+                                            )
+                                        }.onFailure { e ->
+                                            android.util.Log.w("LiveStreamActivity", "like partner", e)
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            null
+                        },
+                        partnerIsLiked = partnerIsLiked,
+                        payerDiamondBalance = if (itzoStandardVideoCall && isStreamer) walletTop else -1,
+                        payerDiamondRatePerMinute = if (itzoStandardVideoCall && isStreamer) rateTop else 0,
                     )
                 }
             }
@@ -1034,7 +1068,7 @@ class LiveStreamActivity : ComponentActivity() {
                         floatingLiveChatOverlay = false,
                         transparentDockPanel = true,
                         itzoStandardCallDock = !isPkSession && isVideoCall,
-                        bottomSheetComposer = true,
+                        bottomSheetComposer = false,
                         // Bottom overlay resized for video (~45% screen); chat fills the band above controls.
                         audiencePanelFillHeight = isVideoCall,
                         isMicOn = isMicOn,
@@ -2306,12 +2340,68 @@ class LiveStreamActivity : ComponentActivity() {
         }
     }
 
+    private fun startRealtimeCallBilling() {
+        if (!isStreamer || isPkSession || overlayPeerId.isBlank()) return
+        val myUid = FirebaseAuth.getInstance().currentUser?.uid?.trim().orEmpty()
+        if (myUid.isBlank()) return
+        realtimeBillingJob?.cancel()
+        realtimeBillingRan = true
+        realtimeBillingJob = lifecycleScope.launch {
+            val rate = callDiamondRatePerMinute.value
+            if (rate <= 0) return@launch
+
+            val firstResult = runCatching {
+                firebaseService.chargeOneCallMinute(myUid, overlayPeerId, rate)
+            }.getOrElse { Result.failure(it) }
+
+            firstResult.onSuccess { newBal ->
+                if (newBal == -1) {
+                    showInsufficientToast()
+                    endRegularCallAndReturn()
+                    return@launch
+                }
+                walletDiamondBalance.value = newBal
+            }
+
+            while (isActive) {
+                delay(59_000L)
+                if (!isActive) break
+                val currentRate = callDiamondRatePerMinute.value
+                if (currentRate <= 0) continue
+                val chargeResult = runCatching {
+                    firebaseService.chargeOneCallMinute(myUid, overlayPeerId, currentRate)
+                }.getOrElse { Result.failure(it) }
+                chargeResult.onSuccess { bal ->
+                    if (bal == -1) {
+                        showInsufficientToast()
+                        endRegularCallAndReturn()
+                        return@launch
+                    }
+                    walletDiamondBalance.value = bal
+                }
+            }
+        }
+    }
+
+    private fun showInsufficientToast() {
+        runOnUiThread {
+            Toast.makeText(
+                this@LiveStreamActivity,
+                getString(R.string.call_ended_insufficient_diamonds),
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+
     private suspend fun performAgoraJoin(channel: String) {
         val am = agoraManager ?: return
         val fbUid = FirebaseAuth.getInstance().currentUser?.uid?.trim().orEmpty()
         if (fbUid.isEmpty()) return
         val uid = am.agoraUidFromFirebaseUid(fbUid)
-        val token = withContext(Dispatchers.IO) { fetchAgoraTokenForPrivateCall(channel) }
+        val token = withContext(Dispatchers.IO) {
+            am.initEngineAsync()
+            fetchAgoraTokenForPrivateCall(channel)
+        }
         if (token == null) {
             withContext(Dispatchers.Main) {
                 if (!teardownHandled) setCallUiState(CallUIState.CallFailed)
@@ -2659,6 +2749,7 @@ class LiveStreamActivity : ComponentActivity() {
             } else {
                 oneOnOneCallReachedConnected = true
                 startCallElapsedTicker()
+                startRealtimeCallBilling()
             }
         }
 
@@ -3159,8 +3250,10 @@ class LiveStreamActivity : ComponentActivity() {
         callSessionRemoteEndJob?.cancel()
         callSessionRemoteEndJob = null
         teardownHandled = true
+        realtimeBillingJob?.cancel()
+        realtimeBillingJob = null
         playingGiftOverlay.value = null
-        val needCharge = !isPkSession && oneOnOneCallReachedConnected && isStreamer
+        val needCharge = !isPkSession && oneOnOneCallReachedConnected && isStreamer && !realtimeBillingRan
         val uidCharge = FirebaseAuth.getInstance().currentUser?.uid?.trim().orEmpty()
         val peerCharge = overlayPeerId.trim()
         val elapsedCharge = callElapsedSeconds.value

@@ -11,6 +11,7 @@ import com.zipper.datingapp.live.LiveSessionCleanupPrefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
@@ -78,16 +79,32 @@ private object LiveBroadcastCleanup {
                 }
                 if (!shouldTeardown) return@launch
 
-                val updated = doc.toObject(UserProfile::class.java)?.copy(isLive = false, liveRoomId = null)
-                runCatching { firebaseService.updateUserLiveStatus(uid, false, null) }
-                if (updated != null) {
-                    runCatching { firebaseService.saveUserProfile(updated) }
-                }
-                runCatching { firebaseService.endLiveStream(uid, streamDoc) }
-                    .onFailure { e ->
-                        Log.w(TAG, "endLiveStream onTaskRemoved", e)
-                        runCatching { firebaseService.clearLiveStreamPkBanner(uid) }
+                suspend fun teardownOnce() {
+                    val updated = doc.toObject(UserProfile::class.java)?.copy(isLive = false, liveRoomId = null)
+                    runCatching { firebaseService.updateUserLiveStatus(uid, false, null) }
+                    if (updated != null) {
+                        runCatching { firebaseService.saveUserProfile(updated) }
                     }
+                    runCatching { firebaseService.endLiveStream(uid, streamDoc) }
+                        .onFailure { e ->
+                            Log.w(TAG, "endLiveStream onTaskRemoved", e)
+                            runCatching { firebaseService.clearLiveStreamPkBanner(uid) }
+                        }
+                }
+                teardownOnce()
+                delay(5_000L)
+                val recheck =
+                    runCatching {
+                        FirebaseFirestore.getInstance()
+                            .collection("users")
+                            .document(uid)
+                            .get()
+                            .await()
+                    }.getOrNull()
+                if (recheck?.getBoolean("isLive") == true) {
+                    Log.w(TAG, "isLive still true after onTaskRemoved — retry teardown uid=$uid")
+                    teardownOnce()
+                }
             }.onFailure { e ->
                 Log.w(TAG, "endGhostSoloLiveIfNeeded", e)
             }

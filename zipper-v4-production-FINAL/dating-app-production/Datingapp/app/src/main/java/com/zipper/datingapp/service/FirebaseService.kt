@@ -1311,6 +1311,7 @@ class FirebaseService {
                         "viewerCount" to 0L,
                         "streamStartedAtMillis" to now,
                         "updatedAtMs" to now,
+                        "hostHeartbeatAtMs" to now,
                         "audioOnlyStream" to audioOnlyStream
                     )
                     if (audioOnlyStream) {
@@ -1321,7 +1322,8 @@ class FirebaseService {
                     val started = snap.getLong("streamStartedAtMillis") ?: 0L
                     val updates = hashMapOf<String, Any>(
                         "hostId" to hostId,
-                        "updatedAtMs" to now
+                        "updatedAtMs" to now,
+                        "hostHeartbeatAtMs" to now,
                     )
                     if (resetStreamSessionStart || started <= 0L) {
                         updates["streamStartedAtMillis"] = now
@@ -2016,6 +2018,17 @@ class FirebaseService {
                 if (!snap.exists()) throw IllegalStateException("Audio party room missing")
                 @Suppress("UNCHECKED_CAST")
                 val seats = snap.get("seats") as? Map<String, *> ?: emptyMap<String, Any?>()
+
+                // Prevent one user from occupying multiple seats.
+                val alreadyInSeat = seats.entries.firstOrNull { (k, v) ->
+                    k != key &&
+                        @Suppress("UNCHECKED_CAST")
+                        ((v as? Map<String, *>)?.get("userId") as? String).orEmpty().trim() == userId
+                }
+                if (alreadyInSeat != null) {
+                    throw IllegalStateException("You are already on seat ${alreadyInSeat.key}")
+                }
+
                 @Suppress("UNCHECKED_CAST")
                 val prev = seats[key] as? Map<String, *> ?: emptyMap<String, Any?>()
                 val locked = prev["locked"] == true || prev["locked"] == 1L || "${prev["locked"]}" == "1"
@@ -2562,6 +2575,85 @@ class FirebaseService {
                     }
                     .awaitAll()
                     .toMap(LinkedHashMap())
+            }
+        }
+    }
+
+    /** While hosting, call every ~30s so stale sessions can be torn down server-side and in Discover. */
+    suspend fun pingLiveStreamHeartbeat(streamId: String) {
+        val id = streamId.trim()
+        if (id.isEmpty()) return
+        val now = System.currentTimeMillis()
+        runCatching {
+            liveStreamsCollection.document(id).set(
+                mapOf(
+                    "hostHeartbeatAtMs" to now,
+                    "updatedAtMs" to now,
+                ),
+                SetOptions.merge(),
+            ).await()
+        }.onFailure { e -> Log.w(tag, "pingLiveStreamHeartbeat streamId=$id", e) }
+    }
+
+    /**
+     * Latest host activity per stream doc: max([hostHeartbeatAtMs], [updatedAtMs]).
+     * Used to hide ghost lives in Discover before Cloud Functions run.
+     */
+    suspend fun fetchLiveStreamViewerCounts(hostIds: Collection<String>): Map<String, Int> {
+        val ids = hostIds.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        if (ids.isEmpty()) return emptyMap()
+        return withContext(Dispatchers.IO) {
+            coroutineScope {
+                ids
+                    .map { id ->
+                        async {
+                            val snap =
+                                runCatching {
+                                    liveStreamsCollection.document(id).get(Source.SERVER).await()
+                                }.getOrElse {
+                                    runCatching {
+                                        liveStreamsCollection.document(id).get(Source.DEFAULT).await()
+                                    }.getOrNull()
+                                }
+                            if (snap == null || !snap.exists()) return@async null
+                            val vc = (snap.getLong("viewerCount") ?: 0L).toInt().coerceAtLeast(0)
+                            id to vc
+                        }
+                    }
+                    .awaitAll()
+                    .filterNotNull()
+                    .toMap()
+            }
+        }
+    }
+
+    suspend fun fetchLiveStreamLastActivityMs(hostIds: Collection<String>): Map<String, Long> {
+        val ids = hostIds.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        if (ids.isEmpty()) return emptyMap()
+        return withContext(Dispatchers.IO) {
+            coroutineScope {
+                ids
+                    .map { id ->
+                        async {
+                            val snap =
+                                runCatching {
+                                    liveStreamsCollection.document(id).get(Source.SERVER).await()
+                                }.getOrElse {
+                                    runCatching {
+                                        liveStreamsCollection.document(id).get(Source.DEFAULT).await()
+                                    }.getOrNull()
+                                }
+                            if (snap == null || !snap.exists()) return@async null
+                            val heartbeat = snap.getLong("hostHeartbeatAtMs") ?: 0L
+                            val updated = snap.getLong("updatedAtMs") ?: 0L
+                            val started = snap.getLong("streamStartedAtMillis") ?: 0L
+                            val last = maxOf(heartbeat, updated, started)
+                            if (last <= 0L) null else id to last
+                        }
+                    }
+                    .awaitAll()
+                    .filterNotNull()
+                    .toMap()
             }
         }
     }
@@ -3147,6 +3239,60 @@ class FirebaseService {
             Result.success(charged)
         } catch (e: Exception) {
             Log.w(tag, "chargeCallDiamondSession payer=$payerUid receiver=$receiverUid", e)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Chamet-style **real-time per-minute billing**.
+     *
+     * Charges exactly [diamondsPerMinute] from [payerUid] for one minute, then routes receiver proceeds via
+     * [routeCallReceiverProceedsFromCharge] (referral + streamer eligibility + company treasury).
+     *
+     * @return [Result.success] with payer's new spendable balance after deduction, or **-1** when balance
+     *         was already below [diamondsPerMinute] (caller should end the call).
+     */
+    suspend fun chargeOneCallMinute(
+        payerUid: String,
+        receiverUid: String,
+        diamondsPerMinute: Int,
+    ): Result<Int> {
+        if (payerUid.isBlank() || receiverUid.isBlank() || payerUid == receiverUid) {
+            return Result.success(Int.MAX_VALUE)
+        }
+        val rate = diamondsPerMinute.coerceAtLeast(0)
+        if (rate <= 0) return Result.success(Int.MAX_VALUE)
+
+        return try {
+            data class MinuteCharge(val newBalance: Int, val charged: Int)
+            val result = db.runTransaction { tx ->
+                val payerRef = usersCollection.document(payerUid)
+                val payerSnap = tx.get(payerRef)
+                if (!payerSnap.exists()) throw IllegalStateException("Payer profile missing")
+                val bal = payerSnap.effectiveSpendableDiamondsMerged()
+                if (bal < rate) {
+                    return@runTransaction MinuteCharge(-1, 0)
+                }
+                tx.update(
+                    payerRef,
+                    mapOf(
+                        "coins" to FieldValue.increment(-rate.toLong()),
+                        "walletBalance" to FieldValue.increment(-rate.toLong()),
+                    ),
+                )
+                MinuteCharge(bal - rate, rate)
+            }.await()
+
+            if (result.charged > 0) {
+                routeCallReceiverProceedsFromCharge(payerUid, receiverUid, result.charged)
+            }
+            Log.d(
+                tag,
+                "chargeOneCallMinute: charged=${result.charged} newBal=${result.newBalance} payer=$payerUid",
+            )
+            Result.success(result.newBalance)
+        } catch (e: Exception) {
+            Log.w(tag, "chargeOneCallMinute payer=$payerUid receiver=$receiverUid", e)
             Result.failure(e)
         }
     }

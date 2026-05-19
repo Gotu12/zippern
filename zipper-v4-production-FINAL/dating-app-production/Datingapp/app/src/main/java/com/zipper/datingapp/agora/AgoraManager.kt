@@ -12,7 +12,10 @@ import io.agora.rtc2.IRtcEngineEventHandler
 import io.agora.rtc2.RtcEngine
 import io.agora.rtc2.RtcEngineConfig
 import io.agora.rtc2.video.VideoCanvas
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.withContext
+import java.io.File
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
@@ -81,6 +84,29 @@ class AgoraManager(context: Context) {
             }
         }
 
+    /** Pre-initialise on IO so [RtcEngine.create] does not block the main thread. */
+    suspend fun initEngineAsync() = withContext(Dispatchers.IO) {
+        ensureEngine()
+    }
+
+    private fun clearAgoraCorruptedCache() {
+        try {
+            val agoraDir = File(appContext.filesDir, "agorasdk")
+            if (agoraDir.exists()) {
+                agoraDir.listFiles()
+                    ?.filter {
+                        it.name.endsWith(".db") ||
+                            it.name.endsWith(".db-wal") ||
+                            it.name.endsWith(".db-shm")
+                    }
+                    ?.forEach { it.delete() }
+                Log.d(TAG, "clearAgoraCorruptedCache: cleaned ${agoraDir.absolutePath}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "clearAgoraCorruptedCache failed", e)
+        }
+    }
+
     private fun ensureEngine(): RtcEngine? {
         if (destroyed) return null
         engine?.let {
@@ -91,6 +117,7 @@ class AgoraManager(context: Context) {
             Log.w(TAG, "AGORA_APP_ID empty — engine not created")
             return null
         }
+        clearAgoraCorruptedCache()
         return try {
             val cfg =
                 RtcEngineConfig().apply {
@@ -98,7 +125,13 @@ class AgoraManager(context: Context) {
                     mAppId = appId
                     mEventHandler = eventHandler
                 }
-            RtcEngine.create(cfg).also { engine = it }
+            RtcEngine.create(cfg).also { rtc ->
+                engine = rtc
+                runCatching {
+                    rtc.enableExtension("agora_video_filters_face_capture", "face_capture", false)
+                    rtc.enableExtension("agora_video_filters_face_detection", "face_detection", false)
+                }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "RtcEngine.create failed", e)
             null

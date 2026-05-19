@@ -222,6 +222,7 @@ dependencies {
     implementation(libs.coil.compose)
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.cardview:cardview:1.0.0")

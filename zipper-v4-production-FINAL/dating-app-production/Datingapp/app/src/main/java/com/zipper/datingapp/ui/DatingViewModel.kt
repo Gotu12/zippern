@@ -25,7 +25,9 @@ import com.zipper.datingapp.service.LiveEconomyGiftResult
 import com.zipper.datingapp.R
 import com.zipper.datingapp.DatingApp
 import com.zipper.datingapp.cache.LocalBackendCaches
+import com.zipper.datingapp.live.LiveHostWorkScheduler
 import com.zipper.datingapp.live.LiveSessionCleanupPrefs
+import com.zipper.datingapp.live.LiveStaleConstants
 import com.zipper.datingapp.webrtc.WebRTCManager
 import com.zipper.datingapp.agora.AgoraManager
 import com.zipper.datingapp.economy.VirtualEconomyMath
@@ -104,6 +106,8 @@ data class DatingUiState(
     val isIncomingCall: Boolean = false,
     val callStatus: CallStatus = CallStatus.CONNECTING,
     val activeCallPartner: UserProfile? = null,
+    /** Epoch-ms when callState first became ACTIVE; used when Compose does not pass elapsed seconds. */
+    val callActiveStartedAtMs: Long = 0L,
     val messages: Map<String, List<Message>> = emptyMap(),
     val isLive: Boolean = false,
     /** Solo host on the Live tab Compose path: audio-only WebRTC broadcast (no camera). */
@@ -261,6 +265,8 @@ data class DatingUiState(
     val followActionError: String? = null,
     /** Live gift / economy feedback (Toast); cleared after display. */
     val liveGiftMessage: String? = null,
+    /** One-shot: open diamond shop when a gift send was blocked by insufficient balance. */
+    val showCoinTopUpForGift: Boolean = false,
     /** Incremented when the user swipes to change live but no other stream exists (Toast in Live tab). */
     val liveSwipeNoOthersNonce: Long = 0L,
     /** Firestore-fetched header for DM thread when partner may be missing from [profiles]. */
@@ -438,6 +444,8 @@ class DatingViewModel : ViewModel() {
     private val audioPartyHostPromotionMutex = Mutex()
     /** Throttles [callNoticeMessage] when Agora token callable returns [FirebaseFunctionsException.Code.FAILED_PRECONDITION]. */
     private var lastAgoraTokenConfigNoticeElapsedMs: Long = 0L
+    /** Pings `live_streams/{id}.hostHeartbeatAtMs` while [DatingUiState.isLive]. */
+    private var liveHostHeartbeatJob: Job? = null
 
     init {
         checkUserLoggedIn()
@@ -663,13 +671,33 @@ class DatingViewModel : ViewModel() {
                     Log.w("DatingViewModel", "hostIdsWithLiveStreamDocuments", e)
                     input.liveQueryIds
                 }
+                val soloLiveCandidateIds =
+                    validatedStreamHosts.intersect(input.liveQueryIds)
+                val lastActivityMs =
+                    if (soloLiveCandidateIds.isEmpty()) {
+                        emptyMap()
+                    } else {
+                        runCatching {
+                            withContext(Dispatchers.IO) {
+                                firebaseService.fetchLiveStreamLastActivityMs(soloLiveCandidateIds)
+                            }
+                        }.getOrElse { e ->
+                            Log.w("DatingViewModel", "fetchLiveStreamLastActivityMs", e)
+                            emptyMap()
+                        }
+                    }
+                val nowMs = System.currentTimeMillis()
+                fun isDiscoverableLiveHost(id: String): Boolean {
+                    if (id in pkHostIds) return true
+                    if (id !in input.liveQueryIds || id !in validatedStreamHosts) return false
+                    val last = lastActivityMs[id] ?: return true
+                    return (nowMs - last) <= LiveStaleConstants.STALE_ACTIVITY_MS
+                }
                 val profileIds = input.profiles.map { it.id }.toSet()
                 val enriched = input.profiles.map { p ->
                     val rtdb = input.presenceRtdb[p.id]
                     val online = rtdb ?: p.isOnline
-                    val mergedLive =
-                        (p.id in input.liveQueryIds && p.id in validatedStreamHosts) ||
-                            (p.id in pkHostIds)
+                    val mergedLive = isDiscoverableLiveHost(p.id)
                     p.copy(isLive = mergedLive, isOnline = online)
                 }
                 val missingIds = (input.liveQueryIds + pkHostIds).filter { it !in profileIds }.distinct()
@@ -678,9 +706,7 @@ class DatingViewModel : ViewModel() {
                     UserProfile(
                         id = id,
                         name = "Live",
-                        isLive =
-                            (id in input.liveQueryIds && id in validatedStreamHosts) ||
-                                (id in pkHostIds),
+                        isLive = isDiscoverableLiveHost(id),
                         isOnline = rtdb ?: true
                     )
                 }
@@ -698,11 +724,27 @@ class DatingViewModel : ViewModel() {
                         emptyMap()
                     }
                 }
+                val liveViewerCounts =
+                    if (liveHostIds.isEmpty()) {
+                        emptyMap()
+                    } else {
+                        runCatching {
+                            withContext(Dispatchers.IO) {
+                                firebaseService.fetchLiveStreamViewerCounts(liveHostIds)
+                            }
+                        }.getOrElse { e ->
+                            Log.w("DatingViewModel", "fetchLiveStreamViewerCounts", e)
+                            emptyMap()
+                        }
+                    }
                 val profiles = incoming.map { p ->
                     if (!p.isLive) {
                         p.copy(liveStreamAudioOnly = false)
                     } else {
-                        p.copy(liveStreamAudioOnly = audioOnlyFlags[p.id] == true)
+                        p.copy(
+                            liveStreamAudioOnly = audioOnlyFlags[p.id] == true,
+                            viewerCount = liveViewerCounts[p.id] ?: p.viewerCount,
+                        )
                     }
                 }
                 val liveCount = profiles.count { it.isLive }
@@ -1121,6 +1163,16 @@ class DatingViewModel : ViewModel() {
         _uiState.update { it.copy(isOtpSent = false, isLoading = false, loginError = null) }
     }
 
+    fun reportLoginFailure(error: Throwable) {
+        Log.w("DatingViewModel", "Login provider failed", error)
+        _uiState.update {
+            it.copy(
+                isLoading = false,
+                loginError = userFacingAuthError(error),
+            )
+        }
+    }
+
     fun setRegistrationGender(gender: String) {
         val normalized = gender.trim().lowercase()
         _uiState.update {
@@ -1142,7 +1194,13 @@ class DatingViewModel : ViewModel() {
                 signInWithCredential(credential)
             }
             override fun onVerificationFailed(e: FirebaseException) {
-                _uiState.update { it.copy(isLoading = false, loginError = e.localizedMessage) }
+                Log.w("DatingViewModel", "Phone verification failed", e)
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        loginError = userFacingAuthError(e),
+                    )
+                }
             }
             override fun onCodeSent(id: String, token: PhoneAuthProvider.ForceResendingToken) {
                 verificationId = id
@@ -1160,7 +1218,16 @@ class DatingViewModel : ViewModel() {
     }
 
     fun verifyOtp(code: String) {
-        val vid = verificationId ?: return
+        val vid = verificationId
+        if (vid == null) {
+            _uiState.update {
+                it.copy(
+                    isLoading = false,
+                    loginError = "OTP session expired. Send the code again.",
+                )
+            }
+            return
+        }
         val credential = PhoneAuthProvider.getCredential(vid, code)
         signInWithCredential(credential)
     }
@@ -1211,8 +1278,35 @@ class DatingViewModel : ViewModel() {
                 startIncomingCallListener(user.uid)
                 scheduleGlobalInboxPrefetch()
             } catch (e: Exception) {
-                _uiState.update { it.copy(isLoading = false, loginError = e.localizedMessage) }
+                Log.w("DatingViewModel", "Firebase credential sign-in failed", e)
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        loginError = userFacingAuthError(e),
+                    )
+                }
             }
+        }
+    }
+
+    private fun userFacingAuthError(error: Throwable): String {
+        val raw = listOfNotNull(
+            (error as? FirebaseAuthException)?.errorCode,
+            error.localizedMessage,
+            error.message,
+            error.cause?.message,
+        ).joinToString(" ").lowercase(Locale.US)
+
+        return when {
+            "invalid_cert_hash" in raw || "17093" in raw || "developer_error" in raw ->
+                "Firebase does not recognize this app signing certificate. Add this APK's SHA-1/SHA-256 in Firebase Console, then download the updated google-services.json."
+            "network" in raw ->
+                "Network error while signing in. Check your connection and try again."
+            "invalid-verification-code" in raw || "invalid verification code" in raw ->
+                "The OTP code is incorrect. Check the SMS and try again."
+            "session-expired" in raw || "expired" in raw ->
+                "OTP session expired. Send the code again."
+            else -> error.localizedMessage ?: error.message ?: "Login failed. Please try again."
         }
     }
 
@@ -2139,7 +2233,8 @@ class DatingViewModel : ViewModel() {
                     webRtcSessionRoomId = roomId,
                     webRtcCallIsStreamer = false,
                     webRtcOverlayHostUserId = callerId,
-                    webRtcShowLiveAudienceChrome = false
+                    webRtcShowLiveAudienceChrome = false,
+                    callActiveStartedAtMs = System.currentTimeMillis(),
                 )
             }
             startWebRtcCallLiveObservers(roomId, callerId)
@@ -2412,6 +2507,10 @@ class DatingViewModel : ViewModel() {
         _uiState.update { it.copy(liveGiftMessage = null) }
     }
 
+    fun clearShowCoinTopUpForGift() {
+        _uiState.update { it.copy(showCoinTopUpForGift = false) }
+    }
+
     fun recordLiveStreamingMinutes(minutes: Int) {
         val uid = auth.currentUser?.uid ?: return
         if (minutes <= 0) return
@@ -2621,7 +2720,8 @@ class DatingViewModel : ViewModel() {
             it.copy(
                 callState = CallState.ACTIVE,
                 callStatus = CallStatus.CONNECTED,
-                isCurrentlyInCall = true
+                isCurrentlyInCall = true,
+                callActiveStartedAtMs = System.currentTimeMillis(),
             )
         }
     }
@@ -2634,7 +2734,14 @@ class DatingViewModel : ViewModel() {
         outgoingCallTimeoutJob?.cancel()
         val snap = _uiState.value
         clearPkMatchmakingBackend(pkBackendOpponentUid(snap))
-        val elapsed = elapsedBillableSeconds?.takeIf { it > 0 }
+        val elapsed: Int? = when {
+            elapsedBillableSeconds != null && elapsedBillableSeconds > 0 -> elapsedBillableSeconds
+            snap.callActiveStartedAtMs > 0L -> {
+                val seconds = ((System.currentTimeMillis() - snap.callActiveStartedAtMs) / 1000L).toInt()
+                seconds.takeIf { it > 0 }
+            }
+            else -> null
+        }
         val payer = snap.webRtcCallIsStreamer
         val partner = snap.activeCallPartner
         val myUid = auth.currentUser?.uid
@@ -2678,7 +2785,8 @@ class DatingViewModel : ViewModel() {
             liveStreamViewerCount = 0,
             webRtcShowLiveAudienceChrome = false,
             pkBattleSession = null,
-            isFreeTeaserCall = false
+            isFreeTeaserCall = false,
+            callActiveStartedAtMs = 0L,
         ) }
         if (pkBannerHost.isNotBlank()) {
             viewModelScope.launch {
@@ -2693,7 +2801,14 @@ class DatingViewModel : ViewModel() {
         outgoingCallTimeoutJob?.cancel()
         val snap = _uiState.value
         clearPkMatchmakingBackend(pkBackendOpponentUid(snap))
-        val elapsed = elapsedBillableSeconds?.takeIf { it > 0 }
+        val elapsed: Int? = when {
+            elapsedBillableSeconds != null && elapsedBillableSeconds > 0 -> elapsedBillableSeconds
+            snap.callActiveStartedAtMs > 0L -> {
+                val seconds = ((System.currentTimeMillis() - snap.callActiveStartedAtMs) / 1000L).toInt()
+                seconds.takeIf { it > 0 }
+            }
+            else -> null
+        }
         val payer = snap.webRtcCallIsStreamer
         val partner = snap.activeCallPartner
         val myUid = auth.currentUser?.uid
@@ -2736,6 +2851,7 @@ class DatingViewModel : ViewModel() {
             webRtcShowLiveAudienceChrome = false,
             pkBattleSession = null,
             isFreeTeaserCall = false,
+            callActiveStartedAtMs = 0L,
             pendingCallRoomId = null,
             pendingCallIsStreamer = false,
             pendingCallLaunchToken = 0,
@@ -4186,7 +4302,11 @@ class DatingViewModel : ViewModel() {
                         }
                     }
                     startLiveHostStreamObservers(uid)
+                    startLiveHostHeartbeat()
+                    DatingApp.applicationContext?.let { LiveHostWorkScheduler.schedule(it) }
                 } else {
+                    stopLiveHostHeartbeat()
+                    DatingApp.applicationContext?.let { LiveHostWorkScheduler.cancel(it) }
                     stopLiveHostStreamObservers()
                     runCatching { firebaseService.endLiveStream(uid, null) }
                         .onFailure { e ->
@@ -4497,7 +4617,16 @@ class DatingViewModel : ViewModel() {
             return
         }
         val totalCost = totalCostLong.toInt()
-        if (stateSnap.coinBalance < totalCost) return
+        if (stateSnap.coinBalance < totalCost) {
+            _uiState.update {
+                it.copy(
+                    isGiftTransactionProcessing = false,
+                    liveGiftMessage = "Not enough diamonds! Tap to top up.",
+                    showCoinTopUpForGift = true,
+                )
+            }
+            return
+        }
 
         val economyHostId = stateSnap.watchingLivePartner?.id?.trim().orEmpty().ifBlank {
             stateSnap.pkBattleSession?.hostUserId?.trim().orEmpty()
@@ -5288,6 +5417,26 @@ class DatingViewModel : ViewModel() {
                 playingGift = null
             )
         }
+    }
+
+    private fun startLiveHostHeartbeat() {
+        liveHostHeartbeatJob?.cancel()
+        val uid = auth.currentUser?.uid?.trim().orEmpty().ifEmpty { return }
+        val streamId = _uiState.value.currentRoomId?.trim().orEmpty().ifEmpty { uid }
+        liveHostHeartbeatJob =
+            viewModelScope.launch {
+                while (true) {
+                    runCatching { firebaseService.pingLiveStreamHeartbeat(streamId) }
+                        .onFailure { e -> Log.w("DatingViewModel", "liveHostHeartbeat", e) }
+                    delay(LiveStaleConstants.HEARTBEAT_INTERVAL_MS)
+                    if (!_uiState.value.isLive) break
+                }
+            }
+    }
+
+    private fun stopLiveHostHeartbeat() {
+        liveHostHeartbeatJob?.cancel()
+        liveHostHeartbeatJob = null
     }
 
     /**
@@ -6185,6 +6334,8 @@ class DatingViewModel : ViewModel() {
         battlesJob?.cancel()
         battleDetailJob?.cancel()
         battleGameStateJob?.cancel()
+        stopLiveHostHeartbeat()
+        DatingApp.applicationContext?.let { LiveHostWorkScheduler.cancel(it) }
         stopLiveHostStreamObservers()
         stopLiveAudienceStreamObservers()
         stopWebRtcCallLiveObservers()

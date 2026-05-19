@@ -939,6 +939,36 @@ fun LiveScreen(
 }
 
 @Composable
+fun ProfilePhotoOrPlaceholder(
+    photoUrl: String?,
+    modifier: Modifier = Modifier,
+    contentScale: ContentScale = ContentScale.Crop,
+    placeholderTint: Color = Color.White.copy(alpha = 0.45f),
+) {
+    val url = photoUrl?.trim().orEmpty()
+    Box(
+        modifier = modifier.background(Color(0xFF2A2A35)),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (url.isNotBlank()) {
+            AsyncImage(
+                model = url,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = contentScale,
+            )
+        } else {
+            Icon(
+                imageVector = Icons.Default.Person,
+                contentDescription = null,
+                tint = placeholderTint,
+                modifier = Modifier.fillMaxSize(0.45f),
+            )
+        }
+    }
+}
+
+@Composable
 fun OnlineProfileAvatar(profile: UserProfile, onClick: () -> Unit) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -948,14 +978,13 @@ fun OnlineProfileAvatar(profile: UserProfile, onClick: () -> Unit) {
             .width(72.dp)
     ) {
         Box {
-            AsyncImage(
-                model = profile.photoUrl,
-                contentDescription = null,
+            ProfilePhotoOrPlaceholder(
+                photoUrl = profile.photoUrl,
                 modifier = Modifier
                     .size(64.dp)
                     .clip(CircleShape)
                     .border(2.dp, Color(0xFF4ADE80), CircleShape),
-                contentScale = ContentScale.Crop
+                contentScale = ContentScale.Crop,
             )
             Box(
                 modifier = Modifier
@@ -985,11 +1014,10 @@ fun NewProfileCard(profile: UserProfile, modifier: Modifier = Modifier, onClick:
         shape = RoundedCornerShape(16.dp)
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
-            AsyncImage(
-                model = profile.photoUrl,
-                contentDescription = null,
+            ProfilePhotoOrPlaceholder(
+                photoUrl = profile.photoUrl,
                 modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
+                contentScale = ContentScale.Crop,
             )
             Box(
                 modifier = Modifier
@@ -3583,27 +3611,27 @@ fun LiveProfileCard(
             },
     ) {
         if (audioPartyListCard) {
-            Row(
+            Box(
                 modifier =
                     Modifier
                         .fillMaxSize()
-                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                        .background(
+                            Brush.verticalGradient(
+                                colors =
+                                    listOf(
+                                        Color(0xFFFFE8F8),
+                                        Color(0xFFFFDDFF),
+                                        Color(0xFFE8D4FF),
+                                    ),
+                            ),
+                        )
+                        .padding(horizontal = 10.dp, vertical = 10.dp),
             ) {
-                Card(
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.size(72.dp),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    AsyncImage(
-                        model = profile.photoUrl,
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop,
-                    )
-                }
-                Spacer(Modifier.width(10.dp))
-                Column(modifier = Modifier.weight(1f)) {
                     Surface(color = Color(0xFFE91E63), shape = RoundedCornerShape(4.dp)) {
                         Row(
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
@@ -3619,39 +3647,59 @@ fun LiveProfileCard(
                             )
                         }
                     }
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        profile.name,
-                        color = Color.Black,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        stringResource(R.string.live_audio_party),
-                        color = ItzoUiTokens.FrameTeal.copy(alpha = 0.95f),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Mic,
-                            contentDescription = null,
-                            tint = ItzoUiTokens.AudioPartyOnRoomText,
-                            modifier = Modifier.size(14.dp),
+                    Card(
+                        shape = CircleShape,
+                        modifier = Modifier.size(88.dp),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+                    ) {
+                        ProfilePhotoOrPlaceholder(
+                            photoUrl = profile.photoUrl,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop,
+                            placeholderTint = ItzoUiTokens.AudioPartyOnRoomText.copy(alpha = 0.5f),
                         )
-                        Spacer(Modifier.width(4.dp))
+                    }
+                    Icon(
+                        imageVector = Icons.Default.GraphicEq,
+                        contentDescription = null,
+                        tint = ItzoUiTokens.FrameTeal.copy(alpha = 0.75f),
+                        modifier = Modifier.size(28.dp),
+                    )
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            stringResource(R.string.live_viewers_count, profile.viewerCount),
-                            color = ItzoUiTokens.AudioPartyOnRoomText.copy(alpha = 0.88f),
-                            fontSize = 11.sp,
+                            profile.name,
+                            color = Color.Black,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center,
+                        )
+                        Text(
+                            stringResource(R.string.live_audio_party),
+                            color = ItzoUiTokens.FrameTeal.copy(alpha = 0.95f),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
+                        Spacer(Modifier.height(4.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = null,
+                                tint = ItzoUiTokens.AudioPartyOnRoomText,
+                                modifier = Modifier.size(14.dp),
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                stringResource(R.string.live_viewers_count, profile.viewerCount),
+                                color = ItzoUiTokens.AudioPartyOnRoomText.copy(alpha = 0.88f),
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
                 }
             }
